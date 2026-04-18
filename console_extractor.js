@@ -182,12 +182,16 @@
                 consecutiveRepetitions++;
                 document.getElementById('extRepeats').textContent = repetitionCount;
                 
-                // Stop automatically and trigger export if we hit 3 repeated songs in a row
-                if (consecutiveRepetitions >= 3) {
+                // Stop automatically and trigger export if repetitions match collected tracks (all songs covered)
+                if (repetitionCount >= collectedTracks.size) {
                     isPaused = true;
-                    document.getElementById('extStatus').textContent = 'Done (Repeats)';
+                    if (extractionInterval) {
+                        clearInterval(extractionInterval);
+                        extractionInterval = null;
+                    }
+                    document.getElementById('extStatus').textContent = `Done (${collectedTracks.size} tracks)`;
                     document.getElementById('extStatus').style.background = '#07bc0c';
-                    showToast('<b>Finished!</b> Reached repeat limit.', 'success');
+                    showToast(`<b>Finished!</b> All ${collectedTracks.size} tracks collected.`, 'success');
                     exportData();
                     return;
                 }
