@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import subprocess
 import shutil
@@ -28,11 +29,12 @@ def process_track(track, tmp_filepath, final_dir, cover_path):
     genre = track.get("genre", "Unknown")
     activity = track.get("activity", "Unknown")
     sub_activity = track.get("sub_activity", "Unknown")
+    neural_effect = track.get("neural_effect", "Unknown")
     instrumentation = track.get("instrumentation", "")
     
     title = f"{song_name} ({genre})"
     artist = "BrainFM"
-    album = f"{activity}: {sub_activity}"
+    album = f"{activity}:{sub_activity} ({neural_effect})"
     
     # Final output file path
     safe_title = "".join([c for c in title if c.isalpha() or c.isdigit() or c in ' -_()']).rstrip()
@@ -106,14 +108,27 @@ def main():
         print("The selected JSON file is empty.")
         return
         
+    for t in tracks:
+        if "neural_effect" in t and isinstance(t["neural_effect"], str):
+            t["neural_effect"] = re.sub(r'(?i)\s*neural effect', '', t["neural_effect"]).strip()
+        
     # Step 2: Extract genres and prompt for genre
     genres = sorted(list(set(track.get("genre", "Unknown") for track in tracks)))
     options = ["All"] + genres
     selected_genre = prompt_choice(options, "Select a genre to download:")
     
-    # Filter tracks
+    # Filter tracks by genre
     if selected_genre != "All":
-        tracks_to_download = [t for t in tracks if t.get("genre") == selected_genre]
+        tracks = [t for t in tracks if t.get("genre", "Unknown") == selected_genre]
+        
+    # Extract neural effects and prompt for neural effect
+    neural_effects = sorted(list(set(track.get("neural_effect", "Unknown") for track in tracks)))
+    options_effects = ["All"] + neural_effects
+    selected_effect = prompt_choice(options_effects, "Select a neural effect to download:")
+    
+    # Filter tracks by neural effect
+    if selected_effect != "All":
+        tracks_to_download = [t for t in tracks if t.get("neural_effect", "Unknown") == selected_effect]
     else:
         tracks_to_download = tracks
         
@@ -134,10 +149,11 @@ def main():
             genre = track.get("genre", "Unknown")
             activity = track.get("activity", "Unknown")
             sub_activity = track.get("sub_activity", "Unknown")
+            neural_effect = track.get("neural_effect", "Unknown")
             
             title = f"{song_name} ({genre})"
             safe_title = "".join([c for c in title if c.isalpha() or c.isdigit() or c in ' -_()']).rstrip()
-            final_dir = os.path.join(downloads_dir, f"{activity} - {sub_activity}", genre)
+            final_dir = os.path.join(downloads_dir, f"{activity}:{sub_activity} ({neural_effect})", genre)
             final_filepath = os.path.join(final_dir, f"{safe_title}.mp3")
             
             if os.path.exists(final_filepath):
@@ -196,12 +212,13 @@ def main():
             activity = track.get("activity", "Unknown")
             sub_activity = track.get("sub_activity", "Unknown")
             genre = track.get("genre", "Unknown")
+            neural_effect = track.get("neural_effect", "Unknown")
             
             # Covers logic (e.g., Focus.png)
             cover_filename = f"{activity}.png"
             cover_path = os.path.join(covers_dir, cover_filename)
             
-            album_dir_name = f"{activity} - {sub_activity}"
+            album_dir_name = f"{activity}:{sub_activity} ({neural_effect})"
             final_dir = os.path.join(downloads_dir, album_dir_name, genre)
             os.makedirs(final_dir, exist_ok=True)
             
