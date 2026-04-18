@@ -155,8 +155,25 @@
         }, 3000);
     }
 
+    function updateTitle() {
+        document.title = `(${collectedTracks.size}/${repetitionCount})`;
+    }
+
+    function dismissObstructions() {
+        // Find and click any "Continue" or "Still listening?" buttons that might obstruct playback
+        const buttons = document.querySelectorAll('button');
+        for (let btn of buttons) {
+            const text = btn.textContent.toLowerCase().trim();
+            if (text === 'continue' || text === 'continue listening' || text === 'yes, still listening') {
+                btn.click();
+            }
+        }
+    }
+
     function checkTrack() {
         if (isPaused) return;
+
+        dismissObstructions();
 
         // Auto-click the "+ Details" button if it's visible, to expose the hidden data fields in the DOM
         const detailBtn = document.querySelector('[data-testid="trackDetail"]');
@@ -181,6 +198,7 @@
                 repetitionCount++;
                 consecutiveRepetitions++;
                 document.getElementById('extRepeats').textContent = repetitionCount;
+                updateTitle();
                 
                 // Stop automatically and trigger export if repetitions match collected tracks (all songs covered)
                 if (repetitionCount >= collectedTracks.size) {
@@ -204,6 +222,7 @@
                 collectedTracks.set(data.song_name, data);
                 document.getElementById('extCount').textContent = collectedTracks.size;
                 document.getElementById('extCurrent').textContent = data.song_name;
+                updateTitle();
                 
                 showToast(`<b>Added:</b> ${data.song_name}`, 'success');
                 const skipBtn = document.querySelector('[data-testid="skipButton"]');
@@ -235,6 +254,7 @@
     function init() {
         const existing = document.getElementById('brainFmExtractor');
         if (existing) existing.remove();
+        updateTitle();
         createUI();
         extractionInterval = setInterval(checkTrack, 2000);
     }
