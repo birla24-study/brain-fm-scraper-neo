@@ -98,14 +98,22 @@ def main():
         print("No JSON files found in the output folder.")
         return
         
-    selected_json = prompt_choice(json_files, "Select a JSON file to process:")
-    json_path = os.path.join(output_dir, selected_json)
+    json_options = ["All"] + json_files
+    selected_json = prompt_choice(json_options, "Select a JSON file to process:")
     
-    with open(json_path, 'r', encoding='utf-8') as f:
-        tracks = json.load(f)
+    tracks = []
+    if selected_json == "All":
+        for jf in json_files:
+            json_path = os.path.join(output_dir, jf)
+            with open(json_path, 'r', encoding='utf-8') as f:
+                tracks.extend(json.load(f))
+    else:
+        json_path = os.path.join(output_dir, selected_json)
+        with open(json_path, 'r', encoding='utf-8') as f:
+            tracks.extend(json.load(f))
         
     if not tracks:
-        print("The selected JSON file is empty.")
+        print("The selected JSON file(s) are empty.")
         return
         
     for t in tracks:
