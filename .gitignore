@@ -7,3 +7,5 @@ __pycache__/
 !package.json
 !tsconfig.json
 /downloads
+
+/tmp_covers
