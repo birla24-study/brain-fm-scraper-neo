@@ -25,6 +25,12 @@ from urllib.parse import unquote, urlparse
 SONG_RE = re.compile(r"^(?P<title>.+) \((?P<genre>.+)\)$")
 FIXED_ID_LEN = 20
 
+# Hardcode credentials here if you do not want to use environment variables.
+# Leave a value empty to fall back to the corresponding env var.
+APPWRITE_ENDPOINT_HARDCODED = "https://fra.cloud.appwrite.io/v1"
+APPWRITE_PROJECT_ID_HARDCODED = "mind-fm"
+APPWRITE_API_KEY_HARDCODED = "standard_0ec221d06d80caede9a3b9caecdc2a123db0529ab79726ab54d7d22112b0b497dc2b8be9fda18d97190f7bd9b2db9a2ae69d7c9b439342565bb3489590e2ad1e37c0a61f5428f90cc6f4ebba06ef85944729c9ff0027ac5ec2dd55091bccb70c5f6cdc0ffbde0df25110517a4b25205811d9655de622c332efae149628b0e924"
+
 
 @dataclass
 class TrackRef:
@@ -376,9 +382,9 @@ def upload_one(storage: Any, bucket_id: str, downloads_root: Path, mapped: Mappe
 def make_client() -> Any:
     from appwrite.client import Client
 
-    endpoint = os.getenv("APPWRITE_ENDPOINT")
-    project = os.getenv("APPWRITE_PROJECT_ID")
-    api_key = os.getenv("APPWRITE_API_KEY")
+    endpoint = APPWRITE_ENDPOINT_HARDCODED or os.getenv("APPWRITE_ENDPOINT")
+    project = APPWRITE_PROJECT_ID_HARDCODED or os.getenv("APPWRITE_PROJECT_ID")
+    api_key = APPWRITE_API_KEY_HARDCODED or os.getenv("APPWRITE_API_KEY")
 
     missing = [name for name, value in {
         "APPWRITE_ENDPOINT": endpoint,
