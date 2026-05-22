@@ -16,6 +16,39 @@ def extract_neural_effect(effect_str):
     if not effect_str: return "Unknown"
     return re.sub(r'(?i)\s*neural effect', '', effect_str).strip()
 
+def download_track(track, old_filepath):
+    source_url = track.get("url")
+    if not source_url:
+        return False
+
+    os.makedirs(os.path.dirname(old_filepath), exist_ok=True)
+
+    if os.path.exists(old_filepath):
+        return True
+
+    try:
+        subprocess.run(
+            [
+                "aria2c",
+                "-x16",
+                "-s16",
+                "--allow-overwrite=true",
+                "--auto-file-renaming=false",
+                "--dir", os.path.dirname(old_filepath),
+                "--out", os.path.basename(old_filepath),
+                source_url,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        return True
+    except Exception as e:
+        print(f"Error downloading {track.get('song_name', 'Unknown')}: {e}")
+        if os.path.exists(old_filepath):
+            os.remove(old_filepath)
+        return False
+
 def process_track(track, old_filepath, new_filepath, cover_path, new_album):
     song_name = track.get("song_name", "Unknown")
     genre = track.get("genre", "Unknown")
@@ -50,11 +83,23 @@ def process_track(track, old_filepath, new_filepath, cover_path, new_album):
         os.makedirs(os.path.dirname(new_filepath), exist_ok=True)
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         shutil.move(tmp_output, new_filepath)
-        print(f"Processed: {title}")
+        print(f"Processed: {title}", flush=True)
+        return True
     except subprocess.CalledProcessError as e:
-        print(f"Error processing {title}: {e}")
+        print(f"Error processing {title}: {e}", flush=True)
         if os.path.exists(tmp_output):
             os.remove(tmp_output)
+        return False
+
+def download_and_process_track(track, old_filepath, new_filepath, cover_path, new_album, track_number, total_tracks):
+    song_name = track.get("song_name", "Unknown")
+    print(f"[{track_number}/{total_tracks}] Downloading: {song_name}", flush=True)
+    if not download_track(track, old_filepath):
+        print(f"[{track_number}/{total_tracks}] Download failed: {song_name}", flush=True)
+        return
+    print(f"[{track_number}/{total_tracks}] Processing: {song_name}", flush=True)
+    if not process_track(track, old_filepath, new_filepath, cover_path, new_album):
+        print(f"[{track_number}/{total_tracks}] Failed: {song_name}", flush=True)
 
 def main():
     parser = argparse.ArgumentParser(description="Process BrainFM tracks selectively.")
@@ -107,9 +152,6 @@ def main():
         
         old_filepath = os.path.join(downloads_dir, old_album_folder, genre, f"{safe_title}.mp3")
         
-        if not os.path.exists(old_filepath):
-            continue
-            
         new_album = f"{activity}: {sub_activity} - {neural_effect}"
         new_filepath = os.path.join(target_dir, new_album, genre, f"{safe_title}.mp3")
         
@@ -131,14 +173,17 @@ def main():
     print(f"Found {len(tracks_to_process)} tracks matching criteria. Processing to: {target_dir}")
     
     with ThreadPoolExecutor(max_workers=4) as executor:
-        for item in tracks_to_process:
+        total_tracks = len(tracks_to_process)
+        for index, item in enumerate(tracks_to_process, start=1):
             executor.submit(
-                process_track, 
+                download_and_process_track, 
                 item["track"], 
                 item["old_filepath"], 
                 item["new_filepath"], 
                 item["cover_path"], 
-                item["new_album"]
+                item["new_album"],
+                index,
+                total_tracks,
             )
                 
     print("Done!")
