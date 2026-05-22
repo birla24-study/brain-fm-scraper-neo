@@ -11,6 +11,9 @@
     let isPaused = false;
     let repetitionCount = 0;
     let consecutiveRepetitions = 0;
+    let originalTitleSetter = null;
+    let originalTitleGetter = null;
+    let progressTitle = '';
     
     function createUI() {
         const container = document.createElement('div');
@@ -155,8 +158,37 @@
         }, 3000);
     }
 
+    function installTitleLock() {
+        if (originalTitleSetter) return;
+
+        const descriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'title');
+        if (!descriptor || typeof descriptor.set !== 'function') return;
+
+        originalTitleSetter = descriptor.set.bind(document);
+        originalTitleGetter = typeof descriptor.get === 'function' ? descriptor.get.bind(document) : null;
+
+        Object.defineProperty(document, 'title', {
+            configurable: true,
+            get() {
+                return progressTitle || (originalTitleGetter ? originalTitleGetter() : '');
+            },
+            set() {
+                originalTitleSetter(progressTitle);
+            }
+        });
+    }
+
+    function setProgressTitle() {
+        progressTitle = `(${collectedTracks.size}/${repetitionCount})`;
+        if (originalTitleSetter) {
+            originalTitleSetter(progressTitle);
+        } else {
+            document.title = progressTitle;
+        }
+    }
+
     function updateTitle() {
-        document.title = `(${collectedTracks.size}/${repetitionCount})`;
+        setProgressTitle();
     }
 
     function dismissObstructions() {
@@ -249,11 +281,17 @@
         a.href = url;
         a.download = `${activity} - ${subActivity}.json`;
         a.click();
+
+        setTimeout(() => {
+            URL.revokeObjectURL(url);
+            window.close();
+        }, 500);
     }
 
     function init() {
         const existing = document.getElementById('brainFmExtractor');
         if (existing) existing.remove();
+        installTitleLock();
         updateTitle();
         createUI();
         extractionInterval = setInterval(checkTrack, 2000);
