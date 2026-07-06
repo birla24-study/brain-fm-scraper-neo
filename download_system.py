@@ -12,6 +12,27 @@ def get_json_files(directory):
 def get_safe_filename(name):
     return "".join([c for c in name if c.isalpha() or c.isdigit() or c in ' -_()']).rstrip()
 
+def slugify(name):
+    return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+
+def find_cover_art(art_dir, song_name):
+    if not os.path.exists(art_dir):
+        return None
+    slug = slugify(song_name)
+    # Direct match check (.jpg, .jpeg, .png)
+    for ext in ['.jpg', '.jpeg', '.png']:
+        path = os.path.join(art_dir, f"{slug}{ext}")
+        if os.path.exists(path):
+            return path
+    # Partial suffix check (e.g. slug-2.jpg)
+    try:
+        for filename in os.listdir(art_dir):
+            if filename.startswith(slug) and filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+                return os.path.join(art_dir, filename)
+    except Exception:
+        pass
+    return None
+
 def extract_neural_effect(effect_str):
     if not effect_str: return "Unknown"
     return re.sub(r'(?i)\s*neural effect', '', effect_str).strip()
@@ -49,16 +70,12 @@ def download_track(track, old_filepath):
             os.remove(old_filepath)
         return False
 
-def process_track(track, old_filepath, new_filepath, cover_path, new_album):
-    song_name = track.get("song_name", "Unknown")
-    genre = track.get("genre", "Unknown")
-    
-    title = f"{song_name} ({genre})"
+def process_track(track, old_filepath, new_filepath, cover_path, new_album, title):
     tmp_output = new_filepath + ".tmp.mp3"
     
     cmd = ["ffmpeg", "-y", "-i", old_filepath]
     
-    has_cover = os.path.exists(cover_path)
+    has_cover = cover_path and os.path.exists(cover_path)
     if has_cover:
         cmd.extend(["-i", cover_path, "-map", "0:a:0", "-map", "1:0"])
     else:
@@ -67,6 +84,7 @@ def process_track(track, old_filepath, new_filepath, cover_path, new_album):
     cmd.extend([
         "-c", "copy",
         "-id3v2_version", "3",
+        "-metadata", f"title={title}",
         "-metadata", f"album={new_album}"
     ])
     
@@ -91,90 +109,240 @@ def process_track(track, old_filepath, new_filepath, cover_path, new_album):
             os.remove(tmp_output)
         return False
 
-def download_and_process_track(track, old_filepath, new_filepath, cover_path, new_album, track_number, total_tracks):
+def download_and_process_track(track, old_filepath, new_filepath, cover_path, new_album, title, track_number, total_tracks):
     song_name = track.get("song_name", "Unknown")
     print(f"[{track_number}/{total_tracks}] Downloading: {song_name}", flush=True)
     if not download_track(track, old_filepath):
         print(f"[{track_number}/{total_tracks}] Download failed: {song_name}", flush=True)
         return
     print(f"[{track_number}/{total_tracks}] Processing: {song_name}", flush=True)
-    if not process_track(track, old_filepath, new_filepath, cover_path, new_album):
+    if not process_track(track, old_filepath, new_filepath, cover_path, new_album, title):
         print(f"[{track_number}/{total_tracks}] Failed: {song_name}", flush=True)
 
 def main():
     parser = argparse.ArgumentParser(description="Process BrainFM tracks selectively.")
-    parser.add_argument("-o", "--output", required=True, help="Destination folder for processed files.")
+    parser.add_argument("-o", "--output", help="Destination folder for processed files.")
     parser.add_argument("-a", "--activity", help="Filter by activity (e.g., Focus). Case-insensitive.")
     parser.add_argument("-g", "--genre", help="Filter by genre (e.g., LoFi). Case-insensitive.")
     args = parser.parse_args()
 
     base_dir = os.path.abspath(os.path.dirname(__file__))
-    output_dir = os.path.join(base_dir, "output")
-    downloads_dir = os.path.join(base_dir, "downloads")
-    covers_dir = os.path.join(base_dir, "covers")
-    target_dir = os.path.abspath(args.output)
+    raw_dir = os.path.join(base_dir, "raw")
+    art_dir = os.path.join(base_dir, "art")
     
-    if not os.path.exists(covers_dir):
-        print(f"Error: The directory '{covers_dir}' does not exist.")
+    if not os.path.exists(art_dir):
+        print(f"Error: The directory '{art_dir}' does not exist.")
         return
 
-    if not os.path.exists(output_dir):
-        print(f"Error: The JSON directory '{output_dir}' does not exist.")
+    if not os.path.exists(raw_dir):
+        print(f"Error: The directory '{raw_dir}' does not exist.")
         return
 
-    json_files = get_json_files(output_dir)
+    json_files = get_json_files(raw_dir)
     tracks = []
     
     for jf in json_files:
-        with open(os.path.join(output_dir, jf), 'r', encoding='utf-8') as f:
+        with open(os.path.join(raw_dir, jf), 'r', encoding='utf-8') as f:
             tracks.extend(json.load(f))
-            
-    tracks_to_process = []
-    
+
+    if not tracks:
+        print("No tracks found in the JSON metadata.")
+        return
+
+    # Check which tracks exist locally
+    all_tracks_info = []
     for track in tracks:
         activity = track.get("activity", "Unknown")
         genre = track.get("genre", "Unknown")
-
-        # Apply user filters
-        if args.activity and args.activity.lower() != activity.lower():
-            continue
-        if args.genre and args.genre.lower() != genre.lower():
-            continue
-
         sub_activity = track.get("sub_activity", "Unknown")
         neural_effect_full = track.get("neural_effect", "Unknown")
         neural_effect = extract_neural_effect(neural_effect_full)
         song_name = track.get("song_name", "Unknown")
         
         old_album_folder = f"{activity}:{sub_activity} ({neural_effect})"
-        title = f"{song_name} ({genre})"
+        title = f"{song_name} ({neural_effect})"
         safe_title = get_safe_filename(title)
         
-        old_filepath = os.path.join(downloads_dir, old_album_folder, genre, f"{safe_title}.mp3")
+        old_filepath = os.path.join(raw_dir, old_album_folder, genre, f"{safe_title}.mp3")
+        new_album = f"{activity}: {sub_activity}"
         
-        new_album = f"{activity}: {sub_activity} - {neural_effect}"
-        new_filepath = os.path.join(target_dir, new_album, genre, f"{safe_title}.mp3")
+        # Check local existence of raw file
+        exists_local = os.path.exists(old_filepath)
         
-        cover_filename = f"{activity.capitalize()}.png"
-        cover_path = os.path.join(covers_dir, cover_filename)
-            
-        tracks_to_process.append({
+        all_tracks_info.append({
             "track": track,
+            "activity": activity,
+            "sub_activity": sub_activity,
+            "neural_effect": neural_effect,
+            "song_name": song_name,
+            "genre": genre,
             "old_filepath": old_filepath,
-            "new_filepath": new_filepath,
-            "cover_path": cover_path,
-            "new_album": new_album
+            "new_album": new_album,
+            "title": title,
+            "exists_local": exists_local
         })
 
-    if not tracks_to_process:
-        print("No tracks matched your criteria or no local files found.")
+    # Determine interactive mode
+    is_interactive = args.output is None
+
+    if is_interactive:
+        print("=== Brain.fm Downloader Interactive Mode ===")
+        # Prompt for output directory
+        target_dir_input = input("Enter destination folder for processed files [default: processed_output]: ").strip()
+        if not target_dir_input:
+            target_dir_input = "processed_output"
+        target_dir = os.path.abspath(target_dir_input)
+        
+        # Show stats on local files
+        local_count = sum(1 for t in all_tracks_info if t["exists_local"])
+        total_count = len(all_tracks_info)
+        print(f"\nAuto-detect: Found {local_count} / {total_count} raw files locally downloaded in '{raw_dir}'.\n")
+        
+        print("Choose processing mode:")
+        print("1. Process all tracks (download missing, process all)")
+        print("2. Process only locally downloaded raw files (skip downloading)")
+        print("3. Filter and select specific tracks (by Activity, Sub-activity, Genre)")
+        
+        mode = ""
+        while mode not in ["1", "2", "3"]:
+            mode = input("Select option (1-3): ").strip()
+            
+        selected_tracks = []
+        only_local = False
+        
+        if mode == "1":
+            selected_tracks = all_tracks_info
+        elif mode == "2":
+            selected_tracks = [t for t in all_tracks_info if t["exists_local"]]
+            only_local = True
+        elif mode == "3":
+            # Ask if they want to filter locally downloaded only
+            only_local_input = input("Only process locally downloaded files? (y/n) [default: n]: ").strip().lower()
+            only_local = only_local_input == 'y'
+            candidate_tracks = [t for t in all_tracks_info if t["exists_local"]] if only_local else all_tracks_info
+            
+            if not candidate_tracks:
+                print("No candidate tracks available for the selection.")
+                return
+
+            # Selection prompts
+            # 1. Select Activity
+            activities = sorted(list(set(t["activity"] for t in candidate_tracks)))
+            print("\nAvailable Activities:")
+            print("0. All Activities")
+            for idx, act in enumerate(activities, 1):
+                print(f"{idx}. {act}")
+            
+            act_choice = -1
+            while act_choice < 0 or act_choice > len(activities):
+                try:
+                    act_choice = int(input(f"Select Activity (0-{len(activities)}): ").strip())
+                except ValueError:
+                    pass
+            
+            selected_activity = None if act_choice == 0 else activities[act_choice - 1]
+            if selected_activity:
+                candidate_tracks = [t for t in candidate_tracks if t["activity"] == selected_activity]
+                
+            # 2. Select Sub-activity
+            sub_activities = sorted(list(set(t["sub_activity"] for t in candidate_tracks)))
+            print("\nAvailable Sub-activities:")
+            print("0. All Sub-activities")
+            for idx, sub in enumerate(sub_activities, 1):
+                print(f"{idx}. {sub}")
+            
+            sub_choice = -1
+            while sub_choice < 0 or sub_choice > len(sub_activities):
+                try:
+                    sub_choice = int(input(f"Select Sub-activity (0-{len(sub_activities)}): ").strip())
+                except ValueError:
+                    pass
+            
+            selected_sub = None if sub_choice == 0 else sub_activities[sub_choice - 1]
+            if selected_sub:
+                candidate_tracks = [t for t in candidate_tracks if t["sub_activity"] == selected_sub]
+                
+            # 3. Select Genre
+            genres = sorted(list(set(t["genre"] for t in candidate_tracks)))
+            print("\nAvailable Genres:")
+            print("0. All Genres")
+            for idx, gen in enumerate(genres, 1):
+                print(f"{idx}. {gen}")
+            
+            gen_choice = -1
+            while gen_choice < 0 or gen_choice > len(genres):
+                try:
+                    gen_choice = int(input(f"Select Genre (0-{len(genres)}): ").strip())
+                except ValueError:
+                    pass
+            
+            selected_genre = None if gen_choice == 0 else genres[gen_choice - 1]
+            if selected_genre:
+                candidate_tracks = [t for t in candidate_tracks if t["genre"] == selected_genre]
+                
+            selected_tracks = candidate_tracks
+
+        if not selected_tracks:
+            print("No tracks matched your criteria.")
+            return
+
+        # Summary and confirmation
+        local_to_process = sum(1 for t in selected_tracks if t["exists_local"])
+        remote_to_process = len(selected_tracks) - local_to_process
+        
+        print(f"\nSummary of tracks to process:")
+        print(f"- Total: {len(selected_tracks)}")
+        print(f"- Already downloaded (local): {local_to_process}")
+        print(f"- To be downloaded: {remote_to_process}")
+        
+        confirm = input("\nProceed? (y/n) [default: y]: ").strip().lower()
+        if confirm == 'n':
+            print("Aborted.")
+            return
+
+    else:
+        # Non-interactive mode
+        target_dir = os.path.abspath(args.output)
+        selected_tracks = []
+        for t in all_tracks_info:
+            # Apply user filters from CLI arguments
+            if args.activity and args.activity.lower() != t["activity"].lower():
+                continue
+            if args.genre and args.genre.lower() != t["genre"].lower():
+                continue
+            selected_tracks.append(t)
+        
+        if not selected_tracks:
+            print("No tracks matched your criteria.")
+            return
+        
+        only_local = False
+
+    # Process all selected tracks
+    print(f"\nProcessing {len(selected_tracks)} tracks to: {target_dir}")
+    
+    tracks_to_submit = []
+    for item in selected_tracks:
+        if only_local and not item["exists_local"]:
+            continue
+            
+        cover_path = find_cover_art(art_dir, item["song_name"])
+        tracks_to_submit.append({
+            "track": item["track"],
+            "old_filepath": item["old_filepath"],
+            "new_filepath": os.path.join(target_dir, item["new_album"], item["genre"], f"{get_safe_filename(item['title'])}.mp3"),
+            "cover_path": cover_path,
+            "new_album": item["new_album"],
+            "title": item["title"]
+        })
+
+    if not tracks_to_submit:
+        print("No tracks to process.")
         return
 
-    print(f"Found {len(tracks_to_process)} tracks matching criteria. Processing to: {target_dir}")
-    
     with ThreadPoolExecutor(max_workers=4) as executor:
-        total_tracks = len(tracks_to_process)
-        for index, item in enumerate(tracks_to_process, start=1):
+        total_tracks = len(tracks_to_submit)
+        for index, item in enumerate(tracks_to_submit, start=1):
             executor.submit(
                 download_and_process_track, 
                 item["track"], 
@@ -182,6 +350,7 @@ def main():
                 item["new_filepath"], 
                 item["cover_path"], 
                 item["new_album"],
+                item["title"],
                 index,
                 total_tracks,
             )
