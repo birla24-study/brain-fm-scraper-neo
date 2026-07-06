@@ -10,3 +10,6 @@ __pycache__/
 
 /tmp_covers
 .venv/
+
+/raw
+/art
