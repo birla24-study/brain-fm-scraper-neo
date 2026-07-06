@@ -5,6 +5,7 @@ import shutil
 import re
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from PIL import Image
 
 def get_json_files(directory):
     return [f for f in os.listdir(directory) if f.endswith('.json')]
@@ -32,6 +33,53 @@ def find_cover_art(art_dir, song_name):
     except Exception:
         pass
     return None
+
+def get_cropped_and_resized_cover(cover_path, size):
+    """
+    Crops the center square of the image and resizes it to size x size.
+    Saves the processed cover in a subfolder and returns the new path.
+    """
+    if not cover_path or not os.path.exists(cover_path):
+        return None
+    try:
+        art_dir = os.path.dirname(cover_path)
+        processed_dir = os.path.join(art_dir, "processed")
+        os.makedirs(processed_dir, exist_ok=True)
+        
+        base_name = os.path.basename(cover_path)
+        name, ext = os.path.splitext(base_name)
+        dest_filename = f"{name}_{size}{ext}"
+        dest_path = os.path.join(processed_dir, dest_filename)
+        
+        if os.path.exists(dest_path):
+            return dest_path
+            
+        with Image.open(cover_path) as img:
+            # Convert RGBA/LA or transparency palette to RGB if saving to JPG
+            if ext.lower() in ['.jpg', '.jpeg']:
+                if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                    rgba_img = img.convert('RGBA')
+                    background = Image.new('RGB', rgba_img.size, (255, 255, 255))
+                    background.paste(rgba_img, mask=rgba_img.split()[3])
+                    img = background
+                else:
+                    img = img.convert('RGB')
+                
+            width, height = img.size
+            min_dim = min(width, height)
+            
+            left = (width - min_dim) / 2
+            top = (height - min_dim) / 2
+            right = (width + min_dim) / 2
+            bottom = (height + min_dim) / 2
+            
+            cropped = img.crop((left, top, right, bottom))
+            resized = cropped.resize((size, size), Image.Resampling.LANCZOS)
+            resized.save(dest_path)
+            return dest_path
+    except Exception as e:
+        print(f"Error processing cover image {cover_path}: {e}")
+        return cover_path
 
 def extract_neural_effect(effect_str):
     if not effect_str: return "Unknown"
@@ -124,6 +172,7 @@ def main():
     parser.add_argument("-o", "--output", help="Destination folder for processed files.")
     parser.add_argument("-a", "--activity", help="Filter by activity (e.g., Focus). Case-insensitive.")
     parser.add_argument("-g", "--genre", help="Filter by genre (e.g., LoFi). Case-insensitive.")
+    parser.add_argument("-s", "--size", type=int, default=1080, help="Size of the cover art (width and height in pixels). Default is 1080.")
     args = parser.parse_args()
 
     base_dir = os.path.abspath(os.path.dirname(__file__))
@@ -192,6 +241,39 @@ def main():
         if not target_dir_input:
             target_dir_input = "processed_output"
         target_dir = os.path.abspath(target_dir_input)
+        
+        # Prompt for cover size
+        print("\nSelect cover art size optimization:")
+        print("1. Phone / Tablet (1080x1080)")
+        print("2. Standard MP3 Player (600x600)")
+        print("3. Compact MP3 Player / Legacy (300x300)")
+        print("4. Custom size")
+        
+        size_choice = ""
+        while size_choice not in ["1", "2", "3", "4"]:
+            size_choice = input("Select option (1-4) [default: 1]: ").strip()
+            if not size_choice:
+                size_choice = "1"
+                
+        if size_choice == "1":
+            cover_size = 1080
+        elif size_choice == "2":
+            cover_size = 600
+        elif size_choice == "3":
+            cover_size = 300
+        elif size_choice == "4":
+            while True:
+                try:
+                    custom_size_input = input("Enter custom size (e.g., 500) [default: 1080]: ").strip()
+                    if not custom_size_input:
+                        cover_size = 1080
+                        break
+                    cover_size = int(custom_size_input)
+                    if cover_size > 0:
+                        break
+                    print("Size must be a positive integer.")
+                except ValueError:
+                    print("Invalid input. Please enter a valid integer.")
         
         # Show stats on local files
         local_count = sum(1 for t in all_tracks_info if t["exists_local"])
@@ -303,6 +385,7 @@ def main():
     else:
         # Non-interactive mode
         target_dir = os.path.abspath(args.output)
+        cover_size = args.size
         selected_tracks = []
         for t in all_tracks_info:
             # Apply user filters from CLI arguments
@@ -327,11 +410,18 @@ def main():
             continue
             
         cover_path = find_cover_art(art_dir, item["song_name"])
+        processed_cover_path = get_cropped_and_resized_cover(cover_path, cover_size)
+        
+        safe_album = get_safe_filename(item["new_album"].replace(":", " -"))
+        safe_genre = get_safe_filename(item["genre"])
+        safe_filename = f"{get_safe_filename(item['title'])}.mp3"
+        new_filepath = os.path.join(target_dir, safe_album, safe_genre, safe_filename)
+        
         tracks_to_submit.append({
             "track": item["track"],
             "old_filepath": item["old_filepath"],
-            "new_filepath": os.path.join(target_dir, item["new_album"], item["genre"], f"{get_safe_filename(item['title'])}.mp3"),
-            "cover_path": cover_path,
+            "new_filepath": new_filepath,
+            "cover_path": processed_cover_path,
             "new_album": item["new_album"],
             "title": item["title"]
         })
