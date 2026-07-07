@@ -5,6 +5,9 @@ import shutil
 import re
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import urllib.request
+import urllib.parse
+import threading
 from PIL import Image
 
 def get_json_files(directory):
@@ -33,6 +36,66 @@ def find_cover_art(art_dir, song_name):
     except Exception:
         pass
     return None
+
+cover_lock = threading.Lock()
+
+def download_cover_art(song_name, cover_url, art_dir):
+    if not cover_url:
+        return None
+    
+    slug = slugify(song_name)
+    dest_path = os.path.join(art_dir, f"{slug}.jpg")
+    
+    if os.path.exists(dest_path):
+        return dest_path
+        
+    try:
+        parsed = urllib.parse.urlparse(cover_url)
+        query_params = urllib.parse.parse_qsl(parsed.query)
+        
+        new_params = []
+        has_w = False
+        for k, v in query_params:
+            if k == 'q':
+                continue
+            if k == 'w':
+                v = '2400'
+                has_w = True
+            new_params.append((k, v))
+            
+        if not has_w:
+            new_params.append(('w', '2400'))
+            
+        new_query = urllib.parse.urlencode(new_params)
+        modified_url = urllib.parse.urlunparse((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            new_query,
+            parsed.fragment
+        ))
+        
+        print(f"Downloading cover art for: {song_name}...", flush=True)
+        os.makedirs(art_dir, exist_ok=True)
+        
+        req = urllib.request.Request(
+            modified_url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            with open(dest_path, 'wb') as f:
+                f.write(response.read())
+                
+        return dest_path
+    except Exception as e:
+        print(f"Error downloading cover art for {song_name}: {e}", flush=True)
+        if os.path.exists(dest_path):
+            try:
+                os.remove(dest_path)
+            except:
+                pass
+        return None
 
 def get_cropped_and_resized_cover(cover_path, size):
     """
@@ -133,9 +196,28 @@ def process_track(track, old_filepath, new_filepath, cover_path, new_album, titl
         "-c", "copy",
         "-id3v2_version", "3",
         "-metadata", f"title={title}",
-        "-metadata", f"album={new_album}"
+        "-metadata", f"album={new_album}",
+        "-metadata", "artist=BrainFM",
+        "-metadata", "album_artist=BrainFM",
+        "-metadata", f"genre={track.get('sub_activity', 'Unknown')}"
     ])
     
+    comment_parts = []
+    if track.get("genre"):
+        comment_parts.append(f"Genre: {track.get('genre')}")
+    if track.get("moods"):
+        comment_parts.append(f"Moods: {track.get('moods')}")
+    if track.get("instrumentation"):
+        comment_parts.append(f"Instrumentation: {track.get('instrumentation')}")
+    if track.get("complexity"):
+        comment_parts.append(f"Complexity: {track.get('complexity')}")
+    if track.get("brightness"):
+        comment_parts.append(f"Brightness: {track.get('brightness')}")
+    comment_str = " | ".join(comment_parts)
+    
+    if comment_str:
+        cmd.extend(["-metadata", f"comment={comment_str}"])
+        
     if has_cover:
         cmd.extend([
             "-metadata:s:v", "title=Album cover",
@@ -157,13 +239,23 @@ def process_track(track, old_filepath, new_filepath, cover_path, new_album, titl
             os.remove(tmp_output)
         return False
 
-def download_and_process_track(track, old_filepath, new_filepath, cover_path, new_album, title, track_number, total_tracks):
+def download_and_process_track(track, old_filepath, new_filepath, art_dir, cover_size, new_album, title, track_number, total_tracks):
     song_name = track.get("song_name", "Unknown")
     print(f"[{track_number}/{total_tracks}] Downloading: {song_name}", flush=True)
     if not download_track(track, old_filepath):
         print(f"[{track_number}/{total_tracks}] Download failed: {song_name}", flush=True)
         return
     print(f"[{track_number}/{total_tracks}] Processing: {song_name}", flush=True)
+    
+    cover_path = None
+    with cover_lock:
+        cover_path = find_cover_art(art_dir, song_name)
+        if not cover_path:
+            cover_url = track.get("cover_url")
+            cover_path = download_cover_art(song_name, cover_url, art_dir)
+        if cover_path:
+            cover_path = get_cropped_and_resized_cover(cover_path, cover_size)
+            
     if not process_track(track, old_filepath, new_filepath, cover_path, new_album, title):
         print(f"[{track_number}/{total_tracks}] Failed: {song_name}", flush=True)
 
@@ -409,19 +501,14 @@ def main():
         if only_local and not item["exists_local"]:
             continue
             
-        cover_path = find_cover_art(art_dir, item["song_name"])
-        processed_cover_path = get_cropped_and_resized_cover(cover_path, cover_size)
-        
         safe_album = get_safe_filename(item["new_album"].replace(":", " -"))
-        safe_genre = get_safe_filename(item["genre"])
         safe_filename = f"{get_safe_filename(item['title'])}.mp3"
-        new_filepath = os.path.join(target_dir, safe_album, safe_genre, safe_filename)
+        new_filepath = os.path.join(target_dir, safe_album, safe_filename)
         
         tracks_to_submit.append({
             "track": item["track"],
             "old_filepath": item["old_filepath"],
             "new_filepath": new_filepath,
-            "cover_path": processed_cover_path,
             "new_album": item["new_album"],
             "title": item["title"]
         })
@@ -438,7 +525,8 @@ def main():
                 item["track"], 
                 item["old_filepath"], 
                 item["new_filepath"], 
-                item["cover_path"], 
+                art_dir,
+                cover_size,
                 item["new_album"],
                 item["title"],
                 index,
