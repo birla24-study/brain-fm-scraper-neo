@@ -17,21 +17,51 @@ def get_json_files(directory):
 def get_safe_filename(name):
     return "".join([c for c in name if c.isalpha() or c.isdigit() or c in ' -_()']).rstrip()
 
-def slugify(name):
-    return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
-
 def extract_neural_effect(effect_str):
     if not effect_str:
         return "Unknown"
     return re.sub(r'(?i)\s*neural effect', '', effect_str).strip()
 
-def download_and_process_cover(cover_url, cover_size, dest_path):
-    if not cover_url:
-        return None
+# --- PHASE 1: BATCH DOWNLOAD ---
+
+def download_single_audio(source_url, temp_raw_path):
+    if not source_url or os.path.exists(temp_raw_path):
+        return os.path.exists(temp_raw_path)
+    os.makedirs(os.path.dirname(temp_raw_path), exist_ok=True)
+    try:
+        subprocess.run(
+            [
+                "aria2c",
+                "-x16",
+                "-s16",
+                "-j16",
+                "--allow-overwrite=true",
+                "--auto-file-renaming=false",
+                "--dir", os.path.dirname(temp_raw_path),
+                "--out", os.path.basename(temp_raw_path),
+                source_url,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        return True
+    except Exception as e:
+        print(f"Error downloading audio to {temp_raw_path}: {e}", flush=True)
+        if os.path.exists(temp_raw_path):
+            try:
+                os.remove(temp_raw_path)
+            except:
+                pass
+        return False
+
+def download_single_cover(cover_url, temp_raw_cover_path):
+    if not cover_url or os.path.exists(temp_raw_cover_path):
+        return os.path.exists(temp_raw_cover_path)
+    os.makedirs(os.path.dirname(temp_raw_cover_path), exist_ok=True)
     try:
         parsed = urllib.parse.urlparse(cover_url)
         query_params = urllib.parse.parse_qsl(parsed.query)
-        
         new_params = []
         has_w = False
         for k, v in query_params:
@@ -41,31 +71,50 @@ def download_and_process_cover(cover_url, cover_size, dest_path):
                 v = '2400'
                 has_w = True
             new_params.append((k, v))
-            
         if not has_w:
             new_params.append(('w', '2400'))
-            
-        new_query = urllib.parse.urlencode(new_params)
         modified_url = urllib.parse.urlunparse((
-            parsed.scheme,
-            parsed.netloc,
-            parsed.path,
-            parsed.params,
-            new_query,
-            parsed.fragment
+            parsed.scheme, parsed.netloc, parsed.path,
+            parsed.params, urllib.parse.urlencode(new_params), parsed.fragment
         ))
-        
-        temp_dl_path = dest_path + ".raw.jpg"
         req = urllib.request.Request(
             modified_url,
             headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         )
         with urllib.request.urlopen(req, timeout=15) as response:
-            with open(temp_dl_path, 'wb') as f:
+            with open(temp_raw_cover_path, 'wb') as f:
                 f.write(response.read())
-                
-        # Crop to square and resize
-        with Image.open(temp_dl_path) as img:
+        return True
+    except Exception as e:
+        if os.path.exists(temp_raw_cover_path):
+            try:
+                os.remove(temp_raw_cover_path)
+            except:
+                pass
+        return False
+
+def download_track_resources(item, track_idx, total_tracks):
+    final_filepath = item["final_filepath"]
+    if os.path.exists(final_filepath):
+        print(f"[{track_idx}/{total_tracks}] Download skipped (already finished): {item['song_name']}", flush=True)
+        return
+
+    track = item["track"]
+    print(f"[{track_idx}/{total_tracks}] Downloading resources for: {item['song_name']}", flush=True)
+    
+    temp_raw_audio = final_filepath + ".raw.mp3"
+    temp_raw_cover = final_filepath + ".raw_cover.jpg"
+
+    download_single_audio(track.get("url"), temp_raw_audio)
+    download_single_cover(track.get("cover_url"), temp_raw_cover)
+
+# --- PHASE 2: BATCH CROP & RESIZE ---
+
+def crop_and_resize_single_cover(temp_raw_cover_path, temp_processed_cover_path, cover_size):
+    if not os.path.exists(temp_raw_cover_path):
+        return None
+    try:
+        with Image.open(temp_raw_cover_path) as img:
             if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
                 rgba_img = img.convert('RGBA')
                 background = Image.new('RGB', rgba_img.size, (255, 255, 255))
@@ -76,7 +125,6 @@ def download_and_process_cover(cover_url, cover_size, dest_path):
                 
             width, height = img.size
             min_dim = min(width, height)
-            
             left = (width - min_dim) / 2
             top = (height - min_dim) / 2
             right = (width + min_dim) / 2
@@ -84,59 +132,50 @@ def download_and_process_cover(cover_url, cover_size, dest_path):
             
             cropped = img.crop((left, top, right, bottom))
             resized = cropped.resize((cover_size, cover_size), Image.Resampling.LANCZOS)
-            resized.save(dest_path)
-            
-        if os.path.exists(temp_dl_path):
-            os.remove(temp_dl_path)
-        return dest_path
+            resized.save(temp_processed_cover_path)
+        os.remove(temp_raw_cover_path)
+        return temp_processed_cover_path
     except Exception as e:
-        print(f"Error downloading cover art: {e}", flush=True)
-        if 'temp_dl_path' in locals() and os.path.exists(temp_dl_path):
-            try:
-                os.remove(temp_dl_path)
-            except:
-                pass
+        print(f"Error cropping cover {temp_raw_cover_path}: {e}", flush=True)
         return None
 
-def download_audio(source_url, temp_filepath):
-    os.makedirs(os.path.dirname(temp_filepath), exist_ok=True)
-    try:
-        subprocess.run(
-            [
-                "aria2c",
-                "-x16",
-                "-s16",
-                "--allow-overwrite=true",
-                "--auto-file-renaming=false",
-                "--dir", os.path.dirname(temp_filepath),
-                "--out", os.path.basename(temp_filepath),
-                source_url,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        )
-        return True
-    except Exception as e:
-        print(f"Download error: {e}", flush=True)
-        if os.path.exists(temp_filepath):
-            try:
-                os.remove(temp_filepath)
-            except:
-                pass
-        return False
+def process_track_cover(item, cover_size, track_idx, total_tracks):
+    final_filepath = item["final_filepath"]
+    temp_raw_cover = final_filepath + ".raw_cover.jpg"
+    temp_processed_cover = final_filepath + ".cover.jpg"
+    
+    if os.path.exists(temp_raw_cover):
+        print(f"[{track_idx}/{total_tracks}] Cropping cover for: {item['song_name']}", flush=True)
+        crop_and_resize_single_cover(temp_raw_cover, temp_processed_cover, cover_size)
 
-def tag_and_finalize(track, temp_audio_path, cover_path, final_filepath, album, title):
+# --- PHASE 3: BATCH TAG & OUTPUT ---
+
+def tag_and_output_single_track(item, track_idx, total_tracks):
+    final_filepath = item["final_filepath"]
+    if os.path.exists(final_filepath):
+        return
+
+    temp_raw_audio = final_filepath + ".raw.mp3"
+    temp_processed_cover = final_filepath + ".cover.jpg"
+
+    if not os.path.exists(temp_raw_audio):
+        print(f"[{track_idx}/{total_tracks}] Skipping tagging (no raw audio): {item['song_name']}", flush=True)
+        return
+
+    print(f"[{track_idx}/{total_tracks}] Tagging & Exporting: {item['song_name']}", flush=True)
+
+    track = item["track"]
+    title = item["title"]
+    album = item["album"]
     tmp_output = final_filepath + ".tmp.mp3"
-    
-    cmd = ["ffmpeg", "-y", "-i", temp_audio_path]
-    
-    has_cover = cover_path and os.path.exists(cover_path)
+
+    cmd = ["ffmpeg", "-y", "-i", temp_raw_audio]
+    has_cover = os.path.exists(temp_processed_cover)
     if has_cover:
-        cmd.extend(["-i", cover_path, "-map", "0:a:0", "-map", "1:0"])
+        cmd.extend(["-i", temp_processed_cover, "-map", "0:a:0", "-map", "1:0"])
     else:
         cmd.extend(["-map", "0:a:0"])
-        
+
     cmd.extend([
         "-c", "copy",
         "-id3v2_version", "3",
@@ -146,117 +185,64 @@ def tag_and_finalize(track, temp_audio_path, cover_path, final_filepath, album, 
         "-metadata", "album_artist=BrainFM",
         "-metadata", f"genre={track.get('genre', 'Unknown')}"
     ])
-    
+
     schema_fields = [
-        "neural_effect",
-        "activity",
-        "sub_activity",
-        "genre",
-        "moods",
-        "instrumentation",
-        "complexity",
-        "brightness"
+        "neural_effect", "activity", "sub_activity", "genre",
+        "moods", "instrumentation", "complexity", "brightness"
     ]
     for field in schema_fields:
         val = track.get(field)
         if val is not None and val != "":
             cmd.extend(["-metadata", f"{field}={val}"])
-            
+
     comment_parts = []
-    if track.get("genre"):
-        comment_parts.append(f"Genre: {track.get('genre')}")
-    if track.get("moods"):
-        comment_parts.append(f"Moods: {track.get('moods')}")
-    if track.get("instrumentation"):
-        comment_parts.append(f"Instrumentation: {track.get('instrumentation')}")
-    if track.get("complexity"):
-        comment_parts.append(f"Complexity: {track.get('complexity')}")
-    if track.get("brightness"):
-        comment_parts.append(f"Brightness: {track.get('brightness')}")
+    if track.get("genre"): comment_parts.append(f"Genre: {track.get('genre')}")
+    if track.get("moods"): comment_parts.append(f"Moods: {track.get('moods')}")
+    if track.get("instrumentation"): comment_parts.append(f"Instrumentation: {track.get('instrumentation')}")
+    if track.get("complexity"): comment_parts.append(f"Complexity: {track.get('complexity')}")
+    if track.get("brightness"): comment_parts.append(f"Brightness: {track.get('brightness')}")
     comment_str = " | ".join(comment_parts)
-    
     if comment_str:
         cmd.extend(["-metadata", f"comment={comment_str}"])
-        
+
     if has_cover:
         cmd.extend([
             "-metadata:s:v", "title=Album cover",
             "-metadata:s:v", "comment=Cover (front)",
             "-disposition:v", "attached_pic"
         ])
-        
+
     cmd.append(tmp_output)
-    
+
     try:
         os.makedirs(os.path.dirname(final_filepath), exist_ok=True)
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         shutil.move(tmp_output, final_filepath)
-        return True
+        print(f"[{track_idx}/{total_tracks}] Completed: {item['song_name']}", flush=True)
     except Exception as e:
-        print(f"Error tagging {title}: {e}", flush=True)
+        print(f"Error tagging {item['song_name']}: {e}", flush=True)
         if os.path.exists(tmp_output):
             try:
                 os.remove(tmp_output)
             except:
                 pass
-        return False
-
-def process_track(track_info, cover_size, track_number, total_tracks):
-    track = track_info["track"]
-    song_name = track_info["song_name"]
-    final_filepath = track_info["final_filepath"]
-    title = track_info["title"]
-    album = track_info["album"]
-    source_url = track.get("url")
-
-    if not source_url:
-        print(f"[{track_number}/{total_tracks}] Skipping (No URL): {song_name}", flush=True)
-        return
-
-    if os.path.exists(final_filepath):
-        print(f"[{track_number}/{total_tracks}] Already exists: {song_name}", flush=True)
-        return
-
-    print(f"[{track_number}/{total_tracks}] Processing on-the-fly: {song_name}", flush=True)
-
-    temp_raw_audio = final_filepath + ".raw.mp3"
-    temp_cover = final_filepath + ".cover.jpg"
-
-    try:
-        # Download audio
-        if not download_audio(source_url, temp_raw_audio):
-            print(f"[{track_number}/{total_tracks}] Download failed: {song_name}", flush=True)
-            return
-
-        # Cover art
-        cover_path = None
-        cover_url = track.get("cover_url")
-        if cover_url:
-            cover_path = download_and_process_cover(cover_url, cover_size, temp_cover)
-
-        # Tag and finalize
-        if tag_and_finalize(track, temp_raw_audio, cover_path, final_filepath, album, title):
-            print(f"[{track_number}/{total_tracks}] Completed: {song_name}", flush=True)
-        else:
-            print(f"[{track_number}/{total_tracks}] Tagging failed: {song_name}", flush=True)
-
     finally:
-        # Cleanup temporary files
-        for tmp_f in [temp_raw_audio, temp_cover]:
-            if tmp_f and os.path.exists(tmp_f):
+        for tmp_f in [temp_raw_audio, temp_processed_cover]:
+            if os.path.exists(tmp_f):
                 try:
                     os.remove(tmp_f)
                 except:
                     pass
 
 def main():
-    parser = argparse.ArgumentParser(description="Download and tag BrainFM tracks on-the-fly directly to output directory.")
+    parser = argparse.ArgumentParser(description="Download, crop, and tag BrainFM tracks in a 3-Phase Batch Pipeline directly to output directory.")
     parser.add_argument("-i", "--input", help="Input directory containing JSON files (default: input).")
     parser.add_argument("-o", "--output", help="Destination folder for tagged files (default: output).")
     parser.add_argument("-a", "--activity", help="Filter by activity (e.g., Focus). Case-insensitive.")
     parser.add_argument("-g", "--genre", help="Filter by genre (e.g., LoFi). Case-insensitive.")
     parser.add_argument("-n", "--neural", help="Filter by neural level (e.g., High, Medium, Low). Case-insensitive.")
     parser.add_argument("-s", "--size", type=int, default=1080, help="Size of the cover art (width and height in pixels). Default is 1080.")
+    parser.add_argument("-t", "--threads", type=int, default=16, help="Number of concurrent worker threads. Default is 16.")
     args = parser.parse_args()
 
     base_dir = os.path.abspath(os.path.dirname(__file__))
@@ -310,7 +296,7 @@ def main():
     is_interactive = args.output is None
 
     if is_interactive:
-        print("=== Brain.fm Downloader (On-the-Fly Mode) ===")
+        print("=== Brain.fm Downloader (3-Phase Batch Pipeline) ===")
         target_dir_input = input("Enter destination folder [default: output]: ").strip()
         if not target_dir_input:
             target_dir_input = "output"
@@ -454,8 +440,7 @@ def main():
             print("No tracks matched your criteria.")
             return
 
-    # Set final filepaths according to required output structure:
-    # output / <Activity>:<Sub-activity> (<Neural Effect>) / <Genre> / <Safe Title>.mp3
+    # Set final filepaths
     for item in selected_tracks:
         item["final_filepath"] = os.path.join(
             target_dir,
@@ -464,20 +449,28 @@ def main():
             f"{item['safe_title']}.mp3"
         )
 
-    print(f"\nProcessing {len(selected_tracks)} tracks into: {target_dir}")
+    total_tracks = len(selected_tracks)
+    print(f"\nProcessing {total_tracks} tracks into: {target_dir} (Threads: {args.threads})")
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        total_tracks = len(selected_tracks)
-        for index, item in enumerate(selected_tracks, start=1):
-            executor.submit(
-                process_track,
-                item,
-                cover_size,
-                index,
-                total_tracks
-            )
+    # PHASE 1: BATCH DOWNLOAD
+    print("\n--- PHASE 1: Batch Downloading All Tracks & Cover Images ---")
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        for idx, item in enumerate(selected_tracks, start=1):
+            executor.submit(download_track_resources, item, idx, total_tracks)
 
-    print("Done!")
+    # PHASE 2: BATCH CROP & RESIZE COVERS
+    print("\n--- PHASE 2: Batch Cropping & Resizing Cover Images ---")
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        for idx, item in enumerate(selected_tracks, start=1):
+            executor.submit(process_track_cover, item, cover_size, idx, total_tracks)
+
+    # PHASE 3: BATCH TAG & EXPORT
+    print("\n--- PHASE 3: Batch Tagging & Outputting MP3s ---")
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        for idx, item in enumerate(selected_tracks, start=1):
+            executor.submit(tag_and_output_single_track, item, idx, total_tracks)
+
+    print("\nBatch Processing Complete!")
 
 if __name__ == "__main__":
     main()
