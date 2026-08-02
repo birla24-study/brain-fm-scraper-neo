@@ -11,7 +11,8 @@ __pycache__/
 /tmp_covers
 .venv/
 
-/raw
-/art
-/processed_output
+/output
+*.tmp
+
+okf_bundle/
 

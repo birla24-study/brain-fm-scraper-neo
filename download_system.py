@@ -7,10 +7,11 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import urllib.request
 import urllib.parse
-import threading
 from PIL import Image
 
 def get_json_files(directory):
+    if not os.path.exists(directory):
+        return []
     return [f for f in os.listdir(directory) if f.endswith('.json')]
 
 def get_safe_filename(name):
@@ -19,36 +20,14 @@ def get_safe_filename(name):
 def slugify(name):
     return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
 
-def find_cover_art(art_dir, song_name):
-    if not os.path.exists(art_dir):
-        return None
-    slug = slugify(song_name)
-    # Direct match check (.jpg, .jpeg, .png)
-    for ext in ['.jpg', '.jpeg', '.png']:
-        path = os.path.join(art_dir, f"{slug}{ext}")
-        if os.path.exists(path):
-            return path
-    # Partial suffix check (e.g. slug-2.jpg)
-    try:
-        for filename in os.listdir(art_dir):
-            if filename.startswith(slug) and filename.lower().endswith(('.jpg', '.jpeg', '.png')):
-                return os.path.join(art_dir, filename)
-    except Exception:
-        pass
-    return None
+def extract_neural_effect(effect_str):
+    if not effect_str:
+        return "Unknown"
+    return re.sub(r'(?i)\s*neural effect', '', effect_str).strip()
 
-cover_lock = threading.Lock()
-
-def download_cover_art(song_name, cover_url, art_dir):
+def download_and_process_cover(cover_url, cover_size, dest_path):
     if not cover_url:
         return None
-    
-    slug = slugify(song_name)
-    dest_path = os.path.join(art_dir, f"{slug}.jpg")
-    
-    if os.path.exists(dest_path):
-        return dest_path
-        
     try:
         parsed = urllib.parse.urlparse(cover_url)
         query_params = urllib.parse.parse_qsl(parsed.query)
@@ -76,57 +55,24 @@ def download_cover_art(song_name, cover_url, art_dir):
             parsed.fragment
         ))
         
-        print(f"Downloading cover art for: {song_name}...", flush=True)
-        os.makedirs(art_dir, exist_ok=True)
-        
+        temp_dl_path = dest_path + ".raw.jpg"
         req = urllib.request.Request(
             modified_url,
             headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         )
         with urllib.request.urlopen(req, timeout=15) as response:
-            with open(dest_path, 'wb') as f:
+            with open(temp_dl_path, 'wb') as f:
                 f.write(response.read())
                 
-        return dest_path
-    except Exception as e:
-        print(f"Error downloading cover art for {song_name}: {e}", flush=True)
-        if os.path.exists(dest_path):
-            try:
-                os.remove(dest_path)
-            except:
-                pass
-        return None
-
-def get_cropped_and_resized_cover(cover_path, size):
-    """
-    Crops the center square of the image and resizes it to size x size.
-    Saves the processed cover in a subfolder and returns the new path.
-    """
-    if not cover_path or not os.path.exists(cover_path):
-        return None
-    try:
-        art_dir = os.path.dirname(cover_path)
-        processed_dir = os.path.join(art_dir, "processed")
-        os.makedirs(processed_dir, exist_ok=True)
-        
-        base_name = os.path.basename(cover_path)
-        name, ext = os.path.splitext(base_name)
-        dest_filename = f"{name}_{size}{ext}"
-        dest_path = os.path.join(processed_dir, dest_filename)
-        
-        if os.path.exists(dest_path):
-            return dest_path
-            
-        with Image.open(cover_path) as img:
-            # Convert RGBA/LA or transparency palette to RGB if saving to JPG
-            if ext.lower() in ['.jpg', '.jpeg']:
-                if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                    rgba_img = img.convert('RGBA')
-                    background = Image.new('RGB', rgba_img.size, (255, 255, 255))
-                    background.paste(rgba_img, mask=rgba_img.split()[3])
-                    img = background
-                else:
-                    img = img.convert('RGB')
+        # Crop to square and resize
+        with Image.open(temp_dl_path) as img:
+            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                rgba_img = img.convert('RGBA')
+                background = Image.new('RGB', rgba_img.size, (255, 255, 255))
+                background.paste(rgba_img, mask=rgba_img.split()[3])
+                img = background
+            else:
+                img = img.convert('RGB')
                 
             width, height = img.size
             min_dim = min(width, height)
@@ -137,27 +83,23 @@ def get_cropped_and_resized_cover(cover_path, size):
             bottom = (height + min_dim) / 2
             
             cropped = img.crop((left, top, right, bottom))
-            resized = cropped.resize((size, size), Image.Resampling.LANCZOS)
+            resized = cropped.resize((cover_size, cover_size), Image.Resampling.LANCZOS)
             resized.save(dest_path)
-            return dest_path
+            
+        if os.path.exists(temp_dl_path):
+            os.remove(temp_dl_path)
+        return dest_path
     except Exception as e:
-        print(f"Error processing cover image {cover_path}: {e}")
-        return cover_path
+        print(f"Error downloading cover art: {e}", flush=True)
+        if 'temp_dl_path' in locals() and os.path.exists(temp_dl_path):
+            try:
+                os.remove(temp_dl_path)
+            except:
+                pass
+        return None
 
-def extract_neural_effect(effect_str):
-    if not effect_str: return "Unknown"
-    return re.sub(r'(?i)\s*neural effect', '', effect_str).strip()
-
-def download_track(track, old_filepath):
-    source_url = track.get("url")
-    if not source_url:
-        return False
-
-    os.makedirs(os.path.dirname(old_filepath), exist_ok=True)
-
-    if os.path.exists(old_filepath):
-        return True
-
+def download_audio(source_url, temp_filepath):
+    os.makedirs(os.path.dirname(temp_filepath), exist_ok=True)
     try:
         subprocess.run(
             [
@@ -166,8 +108,8 @@ def download_track(track, old_filepath):
                 "-s16",
                 "--allow-overwrite=true",
                 "--auto-file-renaming=false",
-                "--dir", os.path.dirname(old_filepath),
-                "--out", os.path.basename(old_filepath),
+                "--dir", os.path.dirname(temp_filepath),
+                "--out", os.path.basename(temp_filepath),
                 source_url,
             ],
             stdout=subprocess.DEVNULL,
@@ -176,15 +118,18 @@ def download_track(track, old_filepath):
         )
         return True
     except Exception as e:
-        print(f"Error downloading {track.get('song_name', 'Unknown')}: {e}")
-        if os.path.exists(old_filepath):
-            os.remove(old_filepath)
+        print(f"Download error: {e}", flush=True)
+        if os.path.exists(temp_filepath):
+            try:
+                os.remove(temp_filepath)
+            except:
+                pass
         return False
 
-def process_track(track, old_filepath, new_filepath, cover_path, new_album, title):
-    tmp_output = new_filepath + ".tmp.mp3"
+def tag_and_finalize(track, temp_audio_path, cover_path, final_filepath, album, title):
+    tmp_output = final_filepath + ".tmp.mp3"
     
-    cmd = ["ffmpeg", "-y", "-i", old_filepath]
+    cmd = ["ffmpeg", "-y", "-i", temp_audio_path]
     
     has_cover = cover_path and os.path.exists(cover_path)
     if has_cover:
@@ -196,13 +141,12 @@ def process_track(track, old_filepath, new_filepath, cover_path, new_album, titl
         "-c", "copy",
         "-id3v2_version", "3",
         "-metadata", f"title={title}",
-        "-metadata", f"album={new_album}",
+        "-metadata", f"album={album}",
         "-metadata", "artist=BrainFM",
         "-metadata", "album_artist=BrainFM",
         "-metadata", f"genre={track.get('genre', 'Unknown')}"
     ])
     
-    # Custom TXXX frames for track schema attributes
     schema_fields = [
         "neural_effect",
         "activity",
@@ -217,7 +161,7 @@ def process_track(track, old_filepath, new_filepath, cover_path, new_album, titl
         val = track.get(field)
         if val is not None and val != "":
             cmd.extend(["-metadata", f"{field}={val}"])
-    
+            
     comment_parts = []
     if track.get("genre"):
         comment_parts.append(f"Genre: {track.get('genre')}")
@@ -244,40 +188,71 @@ def process_track(track, old_filepath, new_filepath, cover_path, new_album, titl
     cmd.append(tmp_output)
     
     try:
-        os.makedirs(os.path.dirname(new_filepath), exist_ok=True)
+        os.makedirs(os.path.dirname(final_filepath), exist_ok=True)
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        shutil.move(tmp_output, new_filepath)
-        print(f"Processed: {title}", flush=True)
+        shutil.move(tmp_output, final_filepath)
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"Error processing {title}: {e}", flush=True)
+    except Exception as e:
+        print(f"Error tagging {title}: {e}", flush=True)
         if os.path.exists(tmp_output):
-            os.remove(tmp_output)
+            try:
+                os.remove(tmp_output)
+            except:
+                pass
         return False
 
-def download_and_process_track(track, old_filepath, new_filepath, art_dir, cover_size, new_album, title, track_number, total_tracks):
-    song_name = track.get("song_name", "Unknown")
-    print(f"[{track_number}/{total_tracks}] Downloading: {song_name}", flush=True)
-    if not download_track(track, old_filepath):
-        print(f"[{track_number}/{total_tracks}] Download failed: {song_name}", flush=True)
+def process_track(track_info, cover_size, track_number, total_tracks):
+    track = track_info["track"]
+    song_name = track_info["song_name"]
+    final_filepath = track_info["final_filepath"]
+    title = track_info["title"]
+    album = track_info["album"]
+    source_url = track.get("url")
+
+    if not source_url:
+        print(f"[{track_number}/{total_tracks}] Skipping (No URL): {song_name}", flush=True)
         return
-    print(f"[{track_number}/{total_tracks}] Processing: {song_name}", flush=True)
-    
-    cover_path = None
-    with cover_lock:
-        cover_path = find_cover_art(art_dir, song_name)
-        if not cover_path:
-            cover_url = track.get("cover_url")
-            cover_path = download_cover_art(song_name, cover_url, art_dir)
-        if cover_path:
-            cover_path = get_cropped_and_resized_cover(cover_path, cover_size)
-            
-    if not process_track(track, old_filepath, new_filepath, cover_path, new_album, title):
-        print(f"[{track_number}/{total_tracks}] Failed: {song_name}", flush=True)
+
+    if os.path.exists(final_filepath):
+        print(f"[{track_number}/{total_tracks}] Already exists: {song_name}", flush=True)
+        return
+
+    print(f"[{track_number}/{total_tracks}] Processing on-the-fly: {song_name}", flush=True)
+
+    temp_raw_audio = final_filepath + ".raw.mp3"
+    temp_cover = final_filepath + ".cover.jpg"
+
+    try:
+        # Download audio
+        if not download_audio(source_url, temp_raw_audio):
+            print(f"[{track_number}/{total_tracks}] Download failed: {song_name}", flush=True)
+            return
+
+        # Cover art
+        cover_path = None
+        cover_url = track.get("cover_url")
+        if cover_url:
+            cover_path = download_and_process_cover(cover_url, cover_size, temp_cover)
+
+        # Tag and finalize
+        if tag_and_finalize(track, temp_raw_audio, cover_path, final_filepath, album, title):
+            print(f"[{track_number}/{total_tracks}] Completed: {song_name}", flush=True)
+        else:
+            print(f"[{track_number}/{total_tracks}] Tagging failed: {song_name}", flush=True)
+
+    finally:
+        # Cleanup temporary files
+        for tmp_f in [temp_raw_audio, temp_cover]:
+            if tmp_f and os.path.exists(tmp_f):
+                try:
+                    os.remove(tmp_f)
+                except:
+                    pass
 
 def main():
-    parser = argparse.ArgumentParser(description="Process BrainFM tracks selectively.")
-    parser.add_argument("-o", "--output", help="Destination folder for processed files.")
+    parser = argparse.ArgumentParser(description="Download and tag BrainFM tracks on-the-fly directly to output directory.")
+    parser.add_argument("-i", "--input", help="Input directory containing JSON files (default: input).")
+    parser.add_argument("-o", "--output", help="Destination folder for tagged files (default: output).")
     parser.add_argument("-a", "--activity", help="Filter by activity (e.g., Focus). Case-insensitive.")
     parser.add_argument("-g", "--genre", help="Filter by genre (e.g., LoFi). Case-insensitive.")
     parser.add_argument("-n", "--neural", help="Filter by neural level (e.g., High, Medium, Low). Case-insensitive.")
@@ -285,48 +260,40 @@ def main():
     args = parser.parse_args()
 
     base_dir = os.path.abspath(os.path.dirname(__file__))
-    raw_dir = os.path.join(base_dir, "raw")
-    art_dir = os.path.join(base_dir, "art")
-    
-    if not os.path.exists(art_dir):
-        print(f"Error: The directory '{art_dir}' does not exist.")
+    input_dir = os.path.abspath(args.input) if args.input else os.path.join(base_dir, "input")
+
+    if not os.path.exists(input_dir):
+        os.makedirs(input_dir, exist_ok=True)
+
+    json_files = get_json_files(input_dir)
+    if not json_files:
+        print(f"No JSON metadata files found in '{input_dir}'. Please place JSON metadata files there.")
         return
 
-    if not os.path.exists(raw_dir):
-        print(f"Error: The directory '{raw_dir}' does not exist.")
-        return
-
-    json_files = get_json_files(raw_dir)
     tracks = []
-    
     for jf in json_files:
-        with open(os.path.join(raw_dir, jf), 'r', encoding='utf-8') as f:
+        with open(os.path.join(input_dir, jf), 'r', encoding='utf-8') as f:
             tracks.extend(json.load(f))
 
     if not tracks:
-        print("No tracks found in the JSON metadata.")
+        print("No tracks found in the input JSON metadata files.")
         return
 
-    # Check which tracks exist locally
+    # Build track processing list
     all_tracks_info = []
     for track in tracks:
         activity = track.get("activity", "Unknown")
-        genre = track.get("genre", "Unknown")
         sub_activity = track.get("sub_activity", "Unknown")
+        genre = track.get("genre", "Unknown")
         neural_effect_full = track.get("neural_effect", "Unknown")
         neural_effect = extract_neural_effect(neural_effect_full)
         song_name = track.get("song_name", "Unknown")
-        
-        old_album_folder = f"{activity}:{sub_activity} ({neural_effect})"
+
+        album_folder = f"{activity}:{sub_activity} ({neural_effect})"
         title = f"{song_name} ({neural_effect})"
         safe_title = get_safe_filename(title)
-        
-        old_filepath = os.path.join(raw_dir, old_album_folder, genre, f"{safe_title}.mp3")
-        new_album = f"{activity}: {sub_activity}"
-        
-        # Check local existence of raw file
-        exists_local = os.path.exists(old_filepath)
-        
+        album = f"{activity}: {sub_activity}"
+
         all_tracks_info.append({
             "track": track,
             "activity": activity,
@@ -334,36 +301,33 @@ def main():
             "neural_effect": neural_effect,
             "song_name": song_name,
             "genre": genre,
-            "old_filepath": old_filepath,
-            "new_album": new_album,
-            "title": title,
-            "exists_local": exists_local
+            "album_folder": album_folder,
+            "safe_title": safe_title,
+            "album": album,
+            "title": title
         })
 
-    # Determine interactive mode
     is_interactive = args.output is None
 
     if is_interactive:
-        print("=== Brain.fm Downloader Interactive Mode ===")
-        # Prompt for output directory
-        target_dir_input = input("Enter destination folder for processed files [default: processed_output]: ").strip()
+        print("=== Brain.fm Downloader (On-the-Fly Mode) ===")
+        target_dir_input = input("Enter destination folder [default: output]: ").strip()
         if not target_dir_input:
-            target_dir_input = "processed_output"
+            target_dir_input = "output"
         target_dir = os.path.abspath(target_dir_input)
-        
-        # Prompt for cover size
+
         print("\nSelect cover art size optimization:")
         print("1. Phone / Tablet (1080x1080)")
         print("2. Standard MP3 Player (600x600)")
         print("3. Compact MP3 Player / Legacy (300x300)")
         print("4. Custom size")
-        
+
         size_choice = ""
         while size_choice not in ["1", "2", "3", "4"]:
             size_choice = input("Select option (1-4) [default: 1]: ").strip()
             if not size_choice:
                 size_choice = "1"
-                
+
         if size_choice == "1":
             cover_size = 1080
         elif size_choice == "2":
@@ -373,7 +337,7 @@ def main():
         elif size_choice == "4":
             while True:
                 try:
-                    custom_size_input = input("Enter custom size (e.g., 500) [default: 1080]: ").strip()
+                    custom_size_input = input("Enter custom size [default: 1080]: ").strip()
                     if not custom_size_input:
                         cover_size = 1080
                         break
@@ -382,140 +346,102 @@ def main():
                         break
                     print("Size must be a positive integer.")
                 except ValueError:
-                    print("Invalid input. Please enter a valid integer.")
-        
-        # Show stats on local files
-        local_count = sum(1 for t in all_tracks_info if t["exists_local"])
-        total_count = len(all_tracks_info)
-        print(f"\nAuto-detect: Found {local_count} / {total_count} raw files locally downloaded in '{raw_dir}'.\n")
-        
-        print("Choose processing mode:")
-        print("1. Process all tracks (download missing, process all)")
-        print("2. Process only locally downloaded raw files (skip downloading)")
-        print("3. Filter and select specific tracks (by Activity, Sub-activity, Genre)")
-        
-        mode = ""
-        while mode not in ["1", "2", "3"]:
-            mode = input("Select option (1-3): ").strip()
-            
-        selected_tracks = []
-        only_local = False
-        
-        if mode == "1":
-            selected_tracks = all_tracks_info
-        elif mode == "2":
-            selected_tracks = [t for t in all_tracks_info if t["exists_local"]]
-            only_local = True
-        elif mode == "3":
-            # Ask if they want to filter locally downloaded only
-            only_local_input = input("Only process locally downloaded files? (y/n) [default: n]: ").strip().lower()
-            only_local = only_local_input == 'y'
-            candidate_tracks = [t for t in all_tracks_info if t["exists_local"]] if only_local else all_tracks_info
-            
-            if not candidate_tracks:
-                print("No candidate tracks available for the selection.")
-                return
+                    print("Invalid input.")
 
-            # Selection prompts
-            # 1. Select Activity
+        print(f"\nFound {len(all_tracks_info)} tracks in JSON metadata.\n")
+        print("Choose processing mode:")
+        print("1. Download & tag all tracks")
+        print("2. Filter and select specific tracks")
+
+        mode = ""
+        while mode not in ["1", "2"]:
+            mode = input("Select option (1-2) [default: 1]: ").strip()
+            if not mode:
+                mode = "1"
+
+        candidate_tracks = all_tracks_info
+
+        if mode == "2":
+            # Filter Activities
             activities = sorted(list(set(t["activity"] for t in candidate_tracks)))
             print("\nAvailable Activities:")
             print("0. All Activities")
             for idx, act in enumerate(activities, 1):
                 print(f"{idx}. {act}")
-            
+
             act_choice = -1
             while act_choice < 0 or act_choice > len(activities):
                 try:
                     act_choice = int(input(f"Select Activity (0-{len(activities)}): ").strip())
                 except ValueError:
                     pass
-            
-            selected_activity = None if act_choice == 0 else activities[act_choice - 1]
-            if selected_activity:
-                candidate_tracks = [t for t in candidate_tracks if t["activity"] == selected_activity]
-                
-            # 2. Select Sub-activity
+            if act_choice > 0:
+                candidate_tracks = [t for t in candidate_tracks if t["activity"] == activities[act_choice - 1]]
+
+            # Filter Sub-activities
             sub_activities = sorted(list(set(t["sub_activity"] for t in candidate_tracks)))
             print("\nAvailable Sub-activities:")
             print("0. All Sub-activities")
             for idx, sub in enumerate(sub_activities, 1):
                 print(f"{idx}. {sub}")
-            
+
             sub_choice = -1
             while sub_choice < 0 or sub_choice > len(sub_activities):
                 try:
                     sub_choice = int(input(f"Select Sub-activity (0-{len(sub_activities)}): ").strip())
                 except ValueError:
                     pass
-            
-            selected_sub = None if sub_choice == 0 else sub_activities[sub_choice - 1]
-            if selected_sub:
-                candidate_tracks = [t for t in candidate_tracks if t["sub_activity"] == selected_sub]
-                
-            # 3. Select Genre
+            if sub_choice > 0:
+                candidate_tracks = [t for t in candidate_tracks if t["sub_activity"] == sub_activities[sub_choice - 1]]
+
+            # Filter Genres
             genres = sorted(list(set(t["genre"] for t in candidate_tracks)))
             print("\nAvailable Genres:")
             print("0. All Genres")
             for idx, gen in enumerate(genres, 1):
                 print(f"{idx}. {gen}")
-            
+
             gen_choice = -1
             while gen_choice < 0 or gen_choice > len(genres):
                 try:
                     gen_choice = int(input(f"Select Genre (0-{len(genres)}): ").strip())
                 except ValueError:
                     pass
-            
-            selected_genre = None if gen_choice == 0 else genres[gen_choice - 1]
-            if selected_genre:
-                candidate_tracks = [t for t in candidate_tracks if t["genre"] == selected_genre]
-                
-            # 4. Select Neural Level
+            if gen_choice > 0:
+                candidate_tracks = [t for t in candidate_tracks if t["genre"] == genres[gen_choice - 1]]
+
+            # Filter Neural Levels
             neural_levels = sorted(list(set(t["neural_effect"] for t in candidate_tracks)))
             print("\nAvailable Neural Levels:")
             print("0. All Neural Levels")
             for idx, nl in enumerate(neural_levels, 1):
                 print(f"{idx}. {nl}")
-            
+
             nl_choice = -1
             while nl_choice < 0 or nl_choice > len(neural_levels):
                 try:
                     nl_choice = int(input(f"Select Neural Level (0-{len(neural_levels)}): ").strip())
                 except ValueError:
                     pass
-            
-            selected_neural = None if nl_choice == 0 else neural_levels[nl_choice - 1]
-            if selected_neural:
-                candidate_tracks = [t for t in candidate_tracks if t["neural_effect"] == selected_neural]
-                
-            selected_tracks = candidate_tracks
+            if nl_choice > 0:
+                candidate_tracks = [t for t in candidate_tracks if t["neural_effect"] == neural_levels[nl_choice - 1]]
+
+        selected_tracks = candidate_tracks
 
         if not selected_tracks:
             print("No tracks matched your criteria.")
             return
 
-        # Summary and confirmation
-        local_to_process = sum(1 for t in selected_tracks if t["exists_local"])
-        remote_to_process = len(selected_tracks) - local_to_process
-        
-        print(f"\nSummary of tracks to process:")
-        print(f"- Total: {len(selected_tracks)}")
-        print(f"- Already downloaded (local): {local_to_process}")
-        print(f"- To be downloaded: {remote_to_process}")
-        
-        confirm = input("\nProceed? (y/n) [default: y]: ").strip().lower()
+        confirm = input(f"\nProceed with processing {len(selected_tracks)} tracks? (y/n) [default: y]: ").strip().lower()
         if confirm == 'n':
             print("Aborted.")
             return
 
     else:
-        # Non-interactive mode
         target_dir = os.path.abspath(args.output)
         cover_size = args.size
         selected_tracks = []
         for t in all_tracks_info:
-            # Apply user filters from CLI arguments
             if args.activity and args.activity.lower() != t["activity"].lower():
                 continue
             if args.genre and args.genre.lower() != t["genre"].lower():
@@ -523,54 +449,34 @@ def main():
             if args.neural and args.neural.lower() != t["neural_effect"].lower():
                 continue
             selected_tracks.append(t)
-        
+
         if not selected_tracks:
             print("No tracks matched your criteria.")
             return
-        
-        only_local = False
 
-    # Process all selected tracks
-    print(f"\nProcessing {len(selected_tracks)} tracks to: {target_dir}")
-    
-    tracks_to_submit = []
+    # Set final filepaths according to required output structure:
+    # output / <Activity>:<Sub-activity> (<Neural Effect>) / <Genre> / <Safe Title>.mp3
     for item in selected_tracks:
-        if only_local and not item["exists_local"]:
-            continue
-            
-        safe_album = get_safe_filename(item["new_album"].replace(":", " -"))
-        clean_title = item["song_name"]
-        safe_filename = f"{get_safe_filename(clean_title)}.mp3"
-        new_filepath = os.path.join(target_dir, safe_album, safe_filename)
-        
-        tracks_to_submit.append({
-            "track": item["track"],
-            "old_filepath": item["old_filepath"],
-            "new_filepath": new_filepath,
-            "new_album": item["new_album"],
-            "title": clean_title
-        })
+        item["final_filepath"] = os.path.join(
+            target_dir,
+            item["album_folder"],
+            item["genre"],
+            f"{item['safe_title']}.mp3"
+        )
 
-    if not tracks_to_submit:
-        print("No tracks to process.")
-        return
+    print(f"\nProcessing {len(selected_tracks)} tracks into: {target_dir}")
 
     with ThreadPoolExecutor(max_workers=4) as executor:
-        total_tracks = len(tracks_to_submit)
-        for index, item in enumerate(tracks_to_submit, start=1):
+        total_tracks = len(selected_tracks)
+        for index, item in enumerate(selected_tracks, start=1):
             executor.submit(
-                download_and_process_track, 
-                item["track"], 
-                item["old_filepath"], 
-                item["new_filepath"], 
-                art_dir,
+                process_track,
+                item,
                 cover_size,
-                item["new_album"],
-                item["title"],
                 index,
-                total_tracks,
+                total_tracks
             )
-                
+
     print("Done!")
 
 if __name__ == "__main__":
