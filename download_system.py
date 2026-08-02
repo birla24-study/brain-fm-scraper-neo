@@ -199,8 +199,24 @@ def process_track(track, old_filepath, new_filepath, cover_path, new_album, titl
         "-metadata", f"album={new_album}",
         "-metadata", "artist=BrainFM",
         "-metadata", "album_artist=BrainFM",
-        "-metadata", f"genre={track.get('sub_activity', 'Unknown')}"
+        "-metadata", f"genre={track.get('genre', 'Unknown')}"
     ])
+    
+    # Custom TXXX frames for track schema attributes
+    schema_fields = [
+        "neural_effect",
+        "activity",
+        "sub_activity",
+        "genre",
+        "moods",
+        "instrumentation",
+        "complexity",
+        "brightness"
+    ]
+    for field in schema_fields:
+        val = track.get(field)
+        if val is not None and val != "":
+            cmd.extend(["-metadata", f"{field}={val}"])
     
     comment_parts = []
     if track.get("genre"):
@@ -264,6 +280,7 @@ def main():
     parser.add_argument("-o", "--output", help="Destination folder for processed files.")
     parser.add_argument("-a", "--activity", help="Filter by activity (e.g., Focus). Case-insensitive.")
     parser.add_argument("-g", "--genre", help="Filter by genre (e.g., LoFi). Case-insensitive.")
+    parser.add_argument("-n", "--neural", help="Filter by neural level (e.g., High, Medium, Low). Case-insensitive.")
     parser.add_argument("-s", "--size", type=int, default=1080, help="Size of the cover art (width and height in pixels). Default is 1080.")
     args = parser.parse_args()
 
@@ -454,6 +471,24 @@ def main():
             if selected_genre:
                 candidate_tracks = [t for t in candidate_tracks if t["genre"] == selected_genre]
                 
+            # 4. Select Neural Level
+            neural_levels = sorted(list(set(t["neural_effect"] for t in candidate_tracks)))
+            print("\nAvailable Neural Levels:")
+            print("0. All Neural Levels")
+            for idx, nl in enumerate(neural_levels, 1):
+                print(f"{idx}. {nl}")
+            
+            nl_choice = -1
+            while nl_choice < 0 or nl_choice > len(neural_levels):
+                try:
+                    nl_choice = int(input(f"Select Neural Level (0-{len(neural_levels)}): ").strip())
+                except ValueError:
+                    pass
+            
+            selected_neural = None if nl_choice == 0 else neural_levels[nl_choice - 1]
+            if selected_neural:
+                candidate_tracks = [t for t in candidate_tracks if t["neural_effect"] == selected_neural]
+                
             selected_tracks = candidate_tracks
 
         if not selected_tracks:
@@ -485,6 +520,8 @@ def main():
                 continue
             if args.genre and args.genre.lower() != t["genre"].lower():
                 continue
+            if args.neural and args.neural.lower() != t["neural_effect"].lower():
+                continue
             selected_tracks.append(t)
         
         if not selected_tracks:
@@ -502,7 +539,8 @@ def main():
             continue
             
         safe_album = get_safe_filename(item["new_album"].replace(":", " -"))
-        safe_filename = f"{get_safe_filename(item['title'])}.mp3"
+        clean_title = item["song_name"]
+        safe_filename = f"{get_safe_filename(clean_title)}.mp3"
         new_filepath = os.path.join(target_dir, safe_album, safe_filename)
         
         tracks_to_submit.append({
@@ -510,7 +548,7 @@ def main():
             "old_filepath": item["old_filepath"],
             "new_filepath": new_filepath,
             "new_album": item["new_album"],
-            "title": item["title"]
+            "title": clean_title
         })
 
     if not tracks_to_submit:
